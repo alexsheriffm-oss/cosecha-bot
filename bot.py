@@ -65,14 +65,21 @@ def calc_hours_today(rows):
     salidas  = [r for r in rows if r["tipo"] == "SALGO"]
     total = 0.0
     for i, e in enumerate(entradas):
-        t_e = datetime.strptime(e["hora"], "%H:%M").replace(tzinfo=TZ)
-        if i < len(salidas):
-            t_s = datetime.strptime(salidas[i]["hora"], "%H:%M").replace(tzinfo=TZ)
-            total += (t_s - t_e).total_seconds()
-        else:
-            # Sigue trabajando
-            t_now = now_lp().replace(second=0, microsecond=0)
-            total += (t_now - t_e).total_seconds()
+        try:
+            fecha_str = e["fecha"]  # dd/mm/yyyy
+            t_e = datetime.strptime(f"{fecha_str} {e['hora']}", "%d/%m/%Y %H:%M").replace(tzinfo=TZ)
+            if i < len(salidas):
+                t_s = datetime.strptime(f"{fecha_str} {salidas[i]['hora']}", "%d/%m/%Y %H:%M").replace(tzinfo=TZ)
+                diff = (t_s - t_e).total_seconds()
+            else:
+                # Sigue trabajando
+                t_now = now_lp().replace(second=0, microsecond=0)
+                diff = (t_now - t_e).total_seconds()
+            # Ignorar si el resultado es negativo o mayor a 16h (dato corrupto)
+            if 0 < diff <= 57600:
+                total += diff
+        except Exception:
+            continue
     return total
 
 def is_working(rows):
