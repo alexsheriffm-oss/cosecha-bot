@@ -332,12 +332,88 @@ async def hoy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb  = build_keyboard(working)
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
 
+# ── Comando /equipo ────────────────────────────────────────────────────────────
+async def equipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Muestra quién está trabajando ahora mismo en el equipo."""
+    now   = now_lp()
+    fecha = fmt_date(now)
+    ws    = get_sheet()
+    all_rows = ws.get_all_records()
+
+    # Agrupar por usuario
+    from collections import defaultdict
+    usuarios = defaultdict(list)
+    for r in all_rows:
+        uid = str(r["user_id"])
+        if uid:
+            usuarios[uid].append(r)
+
+    if not usuarios:
+        await update.message.reply_text("📭 Aún no hay miembros registrados.")
+        return
+
+    online  = []
+    offline = []
+
+    for uid, rows in usuarios.items():
+        nombre = rows[-1]["nombre"]
+        rows_hoy = [r for r in rows if r["fecha"] == fecha]
+        working  = is_working(rows_hoy)
+        horas    = calc_hours_today(rows_hoy)
+
+        # Última vez que marcó entrada (cualquier día)
+        entradas_todas = [r for r in rows if r["tipo"] == "ENTRO"]
+        if entradas_todas:
+            ultima_entrada = entradas_todas[-1]
+            desde = ultima_entrada["hora"] if ultima_entrada["fecha"] == fecha else f"ayer {ultima_entrada['hora']}"
+        else:
+            desde = "nunca"
+
+        if working:
+            online.append((nombre, fmt_dur(horas), desde))
+        else:
+            # Última actividad
+            todas = [r for r in rows if r["fecha"] == fecha]
+            if todas:
+                ultima_hora = todas[-1]["hora"]
+                offline.append((nombre, fmt_dur(horas), f"salió {ultima_hora}"))
+            else:
+                offline.append((nombre, "0h 00min", "no registró hoy"))
+
+    # Construir mensaje
+    lineas = [
+        f"🌱 *COSECHA COLECTIVA — Equipo ahora*",
+        f"📅 {fecha}  •  🕐 {fmt_time(now)}",
+        "━━━━━━━━━━━━━━━━",
+    ]
+
+    if online:
+        lineas.append(f"🟢 *TRABAJANDO ({len(online)})*")
+        for nombre, horas_txt, desde in sorted(online):
+            lineas.append(f"  👤 {nombre}")
+            lineas.append(f"      ⏱ {horas_txt} · desde {desde}")
+    else:
+        lineas.append("🟢 *TRABAJANDO* — nadie en línea ahora")
+
+    lineas.append("━━━━━━━━━━━━━━━━")
+
+    if offline:
+        lineas.append(f"⚪ *FUERA DE TURNO ({len(offline)})*")
+        for nombre, horas_txt, estado in sorted(offline):
+            lineas.append(f"  👤 {nombre}  —  {estado}")
+
+    lineas.append("━━━━━━━━━━━━━━━━")
+    lineas.append(f"👥 Total equipo: *{len(usuarios)} personas*")
+
+    await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("hoy",   hoy))
+    app.add_handler(CommandHandler("start",   start))
+    app.add_handler(CommandHandler("hoy",     hoy))
     app.add_handler(CommandHandler("reporte", reporte))
+    app.add_handler(CommandHandler("equipo",  equipo))
     app.add_handler(CallbackQueryHandler(button_handler))
     logger.info("🌱 Wason bot arrancando...")
     app.run_polling(drop_pending_updates=True)
