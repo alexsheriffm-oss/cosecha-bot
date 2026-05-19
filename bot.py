@@ -1,51 +1,48 @@
 import os
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 import gspread
 from google.oauth2.service_account import Credentials
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes
+    Application, CommandHandler, ContextTypes, JobQueue
 )
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, PatternFill, Alignment
 import io
 
-# ── Configuración ──────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN   = os.environ["BOT_TOKEN"]
-SHEET_ID    = os.environ["SHEET_ID"]
-TZ          = ZoneInfo("America/La_Paz")
+BOT_TOKEN  = os.environ["BOT_TOKEN"]
+SHEET_ID   = os.environ["SHEET_ID"]
+GROUP_ID   = int(os.environ.get("GROUP_ID", "-1001001003779316015"))
+TZ         = ZoneInfo("America/La_Paz")
 
-# ── Google Sheets ──────────────────────────────────────────────────────────────
 def get_sheet():
-    creds_json = os.environ["GOOGLE_CREDS_JSON"]
-    creds_dict = json.loads(creds_json)
+    creds_dict = json.loads(os.environ["GOOGLE_CREDS_JSON"])
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    creds  = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
-    sh = client.open_by_key(SHEET_ID)
+    sh     = client.open_by_key(SHEET_ID)
     try:
         ws = sh.worksheet("Registros")
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet("Registros", rows=5000, cols=6)
-        ws.append_row(["user_id", "nombre", "fecha", "tipo", "hora", "horas_dia"])
+        ws = sh.add_worksheet("Registros", rows=5000, cols=7)
+        ws.append_row(["user_id", "nombre", "fecha", "tipo", "modalidad", "hora", "horas_dia"])
     return ws
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
 def now_lp():
     return datetime.now(TZ)
 
 def fmt_date(dt): return dt.strftime("%d/%m/%Y")
 def fmt_time(dt): return dt.strftime("%H:%M")
+
 def fmt_dur(secs):
     h = int(secs // 3600)
     m = int((secs % 3600) // 60)
@@ -59,23 +56,20 @@ def get_user_rows(ws, user_id, fecha=None):
         and (fecha is None or r["fecha"] == fecha)
     ]
 
-def calc_hours_today(rows):
-    """Calcula horas trabajadas hoy sumando pares entrada/salida."""
+def calc_hours(rows):
     entradas = [r for r in rows if r["tipo"] == "ENTRO"]
     salidas  = [r for r in rows if r["tipo"] == "SALGO"]
-    total = 0.0
+    total    = 0.0
     for i, e in enumerate(entradas):
         try:
-            fecha_str = e["fecha"]  # dd/mm/yyyy
+            fecha_str = e["fecha"]
             t_e = datetime.strptime(f"{fecha_str} {e['hora']}", "%d/%m/%Y %H:%M").replace(tzinfo=TZ)
             if i < len(salidas):
                 t_s = datetime.strptime(f"{fecha_str} {salidas[i]['hora']}", "%d/%m/%Y %H:%M").replace(tzinfo=TZ)
                 diff = (t_s - t_e).total_seconds()
             else:
-                # Sigue trabajando
                 t_now = now_lp().replace(second=0, microsecond=0)
-                diff = (t_now - t_e).total_seconds()
-            # Ignorar si el resultado es negativo o mayor a 16h (dato corrupto)
+                diff  = (t_now - t_e).total_seconds()
             if 0 < diff <= 57600:
                 total += diff
         except Exception:
@@ -87,260 +81,121 @@ def is_working(rows):
     salidas  = [r for r in rows if r["tipo"] == "SALGO"]
     return len(entradas) > len(salidas)
 
-def build_keyboard(working: bool):
-    if working:
-        btn = InlineKeyboardButton("🔴 SALGO", callback_data="salgo")
-        return InlineKeyboardMarkup([[btn]])
-    else:
-        btn = InlineKeyboardButton("✅ ENTRO", callback_data="entro")
-        return InlineKeyboardMarkup([[btn]])
+def get_modalidad_hoy(rows):
+    entradas = [r for r in rows if r["tipo"] == "ENTRO"]
+    if entradas:
+        return entradas[-1].get("modalidad", "presencial")
+    return None
 
-def build_message(nombre, horas_seg, working, fecha_str):
-    estado = "🟢 Trabajando ahora" if working else "⚪ Fuera de turno"
-    horas_txt = fmt_dur(horas_seg) if horas_seg > 0 else "0h 00min"
-    return (
-        f"🌱 *COSECHA COLECTIVA*\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"👤 {nombre}\n"
-        f"📅 {fecha_str}\n\n"
-        f"⏱ Hoy trabajaste: *{horas_txt}*\n"
-        f"Estado: {estado}\n"
-        f"━━━━━━━━━━━━━━━━"
-    )
-
-# ── Comando /start ─────────────────────────────────────────────────────────────
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    now     = now_lp()
-    fecha   = fmt_date(now)
-    ws      = get_sheet()
-    rows    = get_user_rows(ws, user.id, fecha)
-    horas   = calc_hours_today(rows)
-    working = is_working(rows)
-    nombre  = user.full_name
-
-    msg = build_message(nombre, horas, working, fecha)
-    kb  = build_keyboard(working)
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
-
-# ── Callbacks ENTRO / SALGO ────────────────────────────────────────────────────
-async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query  = update.callback_query
-    await query.answer()
-    user   = query.from_user
-    accion = query.data          # "entro" o "salgo"
-    now    = now_lp()
-    fecha  = fmt_date(now)
-    hora   = fmt_time(now)
-    ws     = get_sheet()
-    rows   = get_user_rows(ws, user.id, fecha)
-    working = is_working(rows)
-
-    # Validar coherencia
-    if accion == "entro" and working:
-        await query.answer("⚠️ Ya estás trabajando. Primero marca SALGO.", show_alert=True)
-        return
-    if accion == "salgo" and not working:
-        await query.answer("⚠️ No tienes una entrada activa.", show_alert=True)
-        return
-
-    tipo = "ENTRO" if accion == "entro" else "SALGO"
-    ws.append_row([str(user.id), user.full_name, fecha, tipo, hora, ""])
-
-    # Recalcular
-    rows    = get_user_rows(ws, user.id, fecha)
-    horas   = calc_hours_today(rows)
-    working = is_working(rows)
-
-    # Actualizar horas_dia en la última fila de SALGO
-    if tipo == "SALGO":
-        all_data = ws.get_all_values()
-        for i in range(len(all_data) - 1, 0, -1):
-            if all_data[i][0] == str(user.id) and all_data[i][3] == "SALGO" and all_data[i][5] == "":
-                ws.update_cell(i + 1, 6, fmt_dur(horas))
-                break
-
-    confirmacion = "✅ ¡Entrada registrada!" if tipo == "ENTRO" else "🔴 ¡Salida registrada!"
-    msg = build_message(user.full_name, horas, working, fecha)
-    kb  = build_keyboard(working)
-
-    await query.edit_message_text(
-        f"{confirmacion}\n\n{msg}",
-        parse_mode="Markdown",
-        reply_markup=kb
-    )
-
-# ── Comando /reporte ───────────────────────────────────────────────────────────
-async def reporte(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Genera reporte Excel del mes. Uso: /reporte o /reporte 05/2026"""
-    now = now_lp()
-    if ctx.args:
-        try:
-            mes, anio = ctx.args[0].split("/")
-            mes, anio = int(mes), int(anio)
-        except:
-            await update.message.reply_text("❌ Formato: /reporte MM/AAAA  (ej: /reporte 05/2026)")
-            return
-    else:
-        mes, anio = now.month, now.year
-
-    await update.message.reply_text(f"⏳ Generando reporte {mes:02d}/{anio}...")
-
-    ws       = get_sheet()
-    all_rows = ws.get_all_records()
-    mes_str  = f"{mes:02d}"
-    anio_str = str(anio)
-
-    # Filtrar registros del mes
-    filtrados = [
-        r for r in all_rows
-        if r["fecha"] and r["fecha"][3:5] == mes_str and r["fecha"][6:] == anio_str
-    ]
-
-    if not filtrados:
-        await update.message.reply_text(f"📭 No hay registros para {mes:02d}/{anio}.")
-        return
-
-    # Calcular horas por usuario/día
-    from collections import defaultdict
-    resumen = defaultdict(lambda: defaultdict(float))  # {nombre: {fecha: segundos}}
-    nombres = {}
-
-    usuarios = {}
-    for r in filtrados:
-        uid = str(r["user_id"])
-        if uid not in usuarios:
-            usuarios[uid] = []
-        usuarios[uid].append(r)
-        nombres[uid] = r["nombre"]
-
-    for uid, rows in usuarios.items():
-        fechas = set(r["fecha"] for r in rows)
-        for fecha in fechas:
-            rows_dia = [r for r in rows if r["fecha"] == fecha]
-            secs = calc_hours_today(rows_dia)
-            resumen[nombres[uid]][fecha] += secs
-
-    # ── Crear Excel ──────────────────────────────────────────────────────────
-    wb = openpyxl.Workbook()
-    ws_xl = wb.active
-    ws_xl.title = f"Reporte {mes:02d}-{anio}"
-
-    verde_oscuro = "1B4332"
-    verde_medio  = "40916C"
-    verde_claro  = "D8F3DC"
-    blanco       = "FFFFFF"
-    gris         = "F8F9FA"
-
-    # Título
-    ws_xl.merge_cells("A1:E1")
-    titulo = ws_xl["A1"]
-    titulo.value = f"🌱 COSECHA COLECTIVA — Horas trabajadas {mes:02d}/{anio}"
-    titulo.font      = Font(bold=True, size=14, color=blanco)
-    titulo.fill      = PatternFill("solid", fgColor=verde_oscuro)
-    titulo.alignment = Alignment(horizontal="center", vertical="center")
-    ws_xl.row_dimensions[1].height = 30
-
-    # Encabezados
-    headers = ["Nombre", "Fecha", "Horas trabajadas", "En minutos", ""]
-    for col, h in enumerate(headers, 1):
-        cell = ws_xl.cell(row=2, column=col, value=h)
-        cell.font      = Font(bold=True, color=blanco, size=11)
-        cell.fill      = PatternFill("solid", fgColor=verde_medio)
-        cell.alignment = Alignment(horizontal="center")
-
-    # Datos
-    fila = 3
-    totales_persona = {}
-    for nombre in sorted(resumen.keys()):
-        total_persona = 0.0
-        for fecha in sorted(resumen[nombre].keys()):
-            secs = resumen[nombre][fecha]
-            total_persona += secs
-            h = int(secs // 3600)
-            m = int((secs % 3600) // 60)
-            mins = int(secs // 60)
-
-            bg = blanco if fila % 2 == 0 else gris
-            datos = [nombre, fecha, f"{h}h {m:02d}min", mins, ""]
-            for col, val in enumerate(datos, 1):
-                cell = ws_xl.cell(row=fila, column=col, value=val)
-                cell.fill      = PatternFill("solid", fgColor=bg)
-                cell.alignment = Alignment(horizontal="center" if col > 1 else "left")
-            fila += 1
-
-        totales_persona[nombre] = total_persona
-
-        # Subtotal por persona
-        h = int(total_persona // 3600)
-        m = int((total_persona % 3600) // 60)
-        ws_xl.merge_cells(f"A{fila}:B{fila}")
-        cell_sub = ws_xl.cell(row=fila, column=1, value=f"TOTAL {nombre.upper()}")
-        cell_sub.font      = Font(bold=True, color=blanco)
-        cell_sub.fill      = PatternFill("solid", fgColor=verde_medio)
-        cell_sub.alignment = Alignment(horizontal="center")
-        cell_tot = ws_xl.cell(row=fila, column=3, value=f"{h}h {m:02d}min")
-        cell_tot.font      = Font(bold=True, color=blanco)
-        cell_tot.fill      = PatternFill("solid", fgColor=verde_medio)
-        cell_tot.alignment = Alignment(horizontal="center")
-        ws_xl.cell(row=fila, column=4, value=int(total_persona//60)).fill = PatternFill("solid", fgColor=verde_medio)
-        fila += 2
-
-    # Gran total
-    gran_total = sum(totales_persona.values())
-    h = int(gran_total // 3600)
-    m = int((gran_total % 3600) // 60)
-    ws_xl.merge_cells(f"A{fila}:B{fila}")
-    cell_gt = ws_xl.cell(row=fila, column=1, value="TOTAL EQUIPO")
-    cell_gt.font      = Font(bold=True, size=12, color=blanco)
-    cell_gt.fill      = PatternFill("solid", fgColor=verde_oscuro)
-    cell_gt.alignment = Alignment(horizontal="center")
-    cell_gt2 = ws_xl.cell(row=fila, column=3, value=f"{h}h {m:02d}min")
-    cell_gt2.font      = Font(bold=True, size=12, color=blanco)
-    cell_gt2.fill      = PatternFill("solid", fgColor=verde_oscuro)
-    cell_gt2.alignment = Alignment(horizontal="center")
-
-    # Anchos de columna
-    ws_xl.column_dimensions["A"].width = 28
-    ws_xl.column_dimensions["B"].width = 14
-    ws_xl.column_dimensions["C"].width = 18
-    ws_xl.column_dimensions["D"].width = 12
-
-    # Exportar a bytes
-    buf = io.BytesIO()
-    wb.save(buf)
-    buf.seek(0)
-
-    nombre_archivo = f"Cosecha_Colectiva_Horas_{mes:02d}_{anio}.xlsx"
-    await update.message.reply_document(
-        document=buf,
-        filename=nombre_archivo,
-        caption=f"📊 Reporte de horas — {mes:02d}/{anio}\n🌱 Cosecha Colectiva"
-    )
-
-# ── Comando /hoy ───────────────────────────────────────────────────────────────
-async def hoy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def entro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user  = update.effective_user
     now   = now_lp()
     fecha = fmt_date(now)
+    hora  = fmt_time(now)
     ws    = get_sheet()
     rows  = get_user_rows(ws, user.id, fecha)
-    horas = calc_hours_today(rows)
-    working = is_working(rows)
 
-    msg = build_message(user.full_name, horas, working, fecha)
-    kb  = build_keyboard(working)
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
+    if is_working(rows):
+        modalidad = get_modalidad_hoy(rows)
+        if modalidad == "virtual":
+            await update.message.reply_text(
+                f"⚠️ {user.first_name}, ya entraste como *virtual* hoy.\n"
+                f"No puedes registrar entrada presencial el mismo día.\n"
+                f"Usa /salir cuando termines.",
+                parse_mode="Markdown"
+            )
+        else:
+            hora_entrada = [r for r in rows if r["tipo"] == "ENTRO"][-1]["hora"]
+            await update.message.reply_text(
+                f"⚠️ {user.first_name}, ya estás trabajando desde las *{hora_entrada}*.\n"
+                f"Usa /salir cuando termines.",
+                parse_mode="Markdown"
+            )
+        return
 
-# ── Comando /equipo ────────────────────────────────────────────────────────────
-async def equipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Muestra quién está trabajando ahora mismo en el equipo."""
+    ws.append_row([str(user.id), user.full_name, fecha, "ENTRO", "presencial", hora, ""])
+    await update.message.reply_text(
+        f"✅ *{user.full_name}* entró a las *{hora}*\n"
+        f"🏢 Modalidad: presencial\n"
+        f"📅 {fecha}",
+        parse_mode="Markdown"
+    )
+
+async def entrovirtual(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user  = update.effective_user
     now   = now_lp()
     fecha = fmt_date(now)
+    hora  = fmt_time(now)
     ws    = get_sheet()
+    rows  = get_user_rows(ws, user.id, fecha)
+
+    if is_working(rows):
+        modalidad = get_modalidad_hoy(rows)
+        if modalidad == "presencial":
+            await update.message.reply_text(
+                f"⚠️ {user.first_name}, ya entraste de forma *presencial* hoy.\n"
+                f"No puedes registrar entrada virtual el mismo día.\n"
+                f"Usa /salir cuando termines.",
+                parse_mode="Markdown"
+            )
+        else:
+            hora_entrada = [r for r in rows if r["tipo"] == "ENTRO"][-1]["hora"]
+            await update.message.reply_text(
+                f"⚠️ {user.first_name}, ya estás trabajando (virtual) desde las *{hora_entrada}*.\n"
+                f"Usa /salir cuando termines.",
+                parse_mode="Markdown"
+            )
+        return
+
+    ws.append_row([str(user.id), user.full_name, fecha, "ENTRO", "virtual", hora, ""])
+    await update.message.reply_text(
+        f"✅ *{user.full_name}* entró a las *{hora}*\n"
+        f"💻 Modalidad: virtual\n"
+        f"📅 {fecha}",
+        parse_mode="Markdown"
+    )
+
+async def salir(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user  = update.effective_user
+    now   = now_lp()
+    fecha = fmt_date(now)
+    hora  = fmt_time(now)
+    ws    = get_sheet()
+    rows  = get_user_rows(ws, user.id, fecha)
+
+    if not is_working(rows):
+        await update.message.reply_text(
+            f"⚠️ {user.first_name}, no tienes una entrada activa hoy."
+        )
+        return
+
+    modalidad = get_modalidad_hoy(rows)
+    ws.append_row([str(user.id), user.full_name, fecha, "SALGO", modalidad, hora, ""])
+
+    rows_act  = get_user_rows(ws, user.id, fecha)
+    horas     = calc_hours(rows_act)
+    horas_txt = fmt_dur(horas)
+
+    all_data = ws.get_all_values()
+    for i in range(len(all_data) - 1, 0, -1):
+        if all_data[i][0] == str(user.id) and all_data[i][3] == "SALGO" and all_data[i][6] == "":
+            ws.update_cell(i + 1, 7, horas_txt)
+            break
+
+    icono = "🏢" if modalidad == "presencial" else "💻"
+    await update.message.reply_text(
+        f"🔴 *{user.full_name}* salió a las *{hora}*\n"
+        f"{icono} Modalidad: {modalidad}\n"
+        f"⏱ Hoy trabajó: *{horas_txt}*",
+        parse_mode="Markdown"
+    )
+
+async def equipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    now      = now_lp()
+    fecha    = fmt_date(now)
+    ws       = get_sheet()
     all_rows = ws.get_all_records()
 
-    # Agrupar por usuario
     from collections import defaultdict
     usuarios = defaultdict(list)
     for r in all_rows:
@@ -349,73 +204,259 @@ async def equipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             usuarios[uid].append(r)
 
     if not usuarios:
-        await update.message.reply_text("📭 Aún no hay miembros registrados.")
+        await update.message.reply_text("📭 Aún no hay registros.")
         return
 
-    online  = []
-    offline = []
+    presencial_on = []
+    virtual_on    = []
+    fuera         = []
 
     for uid, rows in usuarios.items():
-        nombre = rows[-1]["nombre"]
-        rows_hoy = [r for r in rows if r["fecha"] == fecha]
-        working  = is_working(rows_hoy)
-        horas    = calc_hours_today(rows_hoy)
-
-        # Última vez que marcó entrada (cualquier día)
-        entradas_todas = [r for r in rows if r["tipo"] == "ENTRO"]
-        if entradas_todas:
-            ultima_entrada = entradas_todas[-1]
-            desde = ultima_entrada["hora"] if ultima_entrada["fecha"] == fecha else f"ayer {ultima_entrada['hora']}"
-        else:
-            desde = "nunca"
+        nombre    = rows[-1]["nombre"]
+        rows_hoy  = [r for r in rows if r["fecha"] == fecha]
+        working   = is_working(rows_hoy)
+        horas     = calc_hours(rows_hoy)
+        modalidad = get_modalidad_hoy(rows_hoy)
 
         if working:
-            online.append((nombre, fmt_dur(horas), desde))
-        else:
-            # Última actividad
-            todas = [r for r in rows if r["fecha"] == fecha]
-            if todas:
-                ultima_hora = todas[-1]["hora"]
-                offline.append((nombre, fmt_dur(horas), f"salió {ultima_hora}"))
+            entrada_hora = [r for r in rows_hoy if r["tipo"] == "ENTRO"][-1]["hora"]
+            dato = (nombre, fmt_dur(horas), entrada_hora)
+            if modalidad == "virtual":
+                virtual_on.append(dato)
             else:
-                offline.append((nombre, "0h 00min", "no registró hoy"))
+                presencial_on.append(dato)
+        else:
+            if rows_hoy:
+                ultima = rows_hoy[-1]["hora"]
+                fuera.append((nombre, fmt_dur(horas), f"salió {ultima}"))
+            else:
+                fuera.append((nombre, "0h 00min", "no registró hoy"))
 
-    # Construir mensaje
     lineas = [
-        f"🌱 *COSECHA COLECTIVA — Equipo ahora*",
+        f"🌱 *Biométrico — Cosecha Colectiva*",
         f"📅 {fecha}  •  🕐 {fmt_time(now)}",
         "━━━━━━━━━━━━━━━━",
     ]
 
-    if online:
-        lineas.append(f"🟢 *TRABAJANDO ({len(online)})*")
-        for nombre, horas_txt, desde in sorted(online):
-            lineas.append(f"  👤 {nombre}")
-            lineas.append(f"      ⏱ {horas_txt} · desde {desde}")
+    if presencial_on:
+        lineas.append(f"🏢 *PRESENCIAL ({len(presencial_on)})*")
+        for nombre, horas_txt, desde in sorted(presencial_on):
+            lineas.append(f"  🟢 {nombre}")
+            lineas.append(f"       ⏱ {horas_txt} · desde {desde}")
     else:
-        lineas.append("🟢 *TRABAJANDO* — nadie en línea ahora")
+        lineas.append("🏢 *PRESENCIAL* — nadie en oficina")
 
     lineas.append("━━━━━━━━━━━━━━━━")
 
-    if offline:
-        lineas.append(f"⚪ *FUERA DE TURNO ({len(offline)})*")
-        for nombre, horas_txt, estado in sorted(offline):
+    if virtual_on:
+        lineas.append(f"💻 *VIRTUAL ({len(virtual_on)})*")
+        for nombre, horas_txt, desde in sorted(virtual_on):
+            lineas.append(f"  🟢 {nombre}")
+            lineas.append(f"       ⏱ {horas_txt} · desde {desde}")
+    else:
+        lineas.append("💻 *VIRTUAL* — nadie conectado")
+
+    lineas.append("━━━━━━━━━━━━━━━━")
+
+    if fuera:
+        lineas.append(f"⚪ *FUERA DE TURNO ({len(fuera)})*")
+        for nombre, horas_txt, estado in sorted(fuera):
             lineas.append(f"  👤 {nombre}  —  {estado}")
 
+    total_on = len(presencial_on) + len(virtual_on)
     lineas.append("━━━━━━━━━━━━━━━━")
-    lineas.append(f"👥 Total equipo: *{len(usuarios)} personas*")
+    lineas.append(f"👥 *{total_on} trabajando* de {len(usuarios)} en el equipo")
 
     await update.message.reply_text("\n".join(lineas), parse_mode="Markdown")
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+async def reporte(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    now = now_lp()
+    if ctx.args:
+        try:
+            mes, anio = ctx.args[0].split("/")
+            mes, anio = int(mes), int(anio)
+        except Exception:
+            await update.message.reply_text("❌ Formato: /reporte MM/AAAA  (ej: /reporte 05/2026)")
+            return
+    else:
+        mes, anio = now.month, now.year
+
+    await update.message.reply_text(f"⏳ Generando reporte {mes:02d}/{anio}...")
+
+    ws        = get_sheet()
+    all_rows  = ws.get_all_records()
+    mes_str   = f"{mes:02d}"
+    anio_str  = str(anio)
+
+    filtrados = [
+        r for r in all_rows
+        if r.get("fecha") and str(r["fecha"])[3:5] == mes_str and str(r["fecha"])[6:] == anio_str
+    ]
+
+    if not filtrados:
+        await update.message.reply_text(f"📭 No hay registros para {mes:02d}/{anio}.")
+        return
+
+    from collections import defaultdict
+    resumen  = defaultdict(lambda: defaultdict(lambda: {"secs": 0.0, "modalidad": "presencial"}))
+    usuarios = defaultdict(list)
+    nombres  = {}
+
+    for r in filtrados:
+        uid = str(r["user_id"])
+        usuarios[uid].append(r)
+        nombres[uid] = r["nombre"]
+
+    for uid, rows in usuarios.items():
+        fechas = set(r["fecha"] for r in rows)
+        for fecha in fechas:
+            rows_dia  = [r for r in rows if r["fecha"] == fecha]
+            secs      = calc_hours(rows_dia)
+            modalidad = get_modalidad_hoy(rows_dia) or "presencial"
+            resumen[nombres[uid]][fecha] = {"secs": secs, "modalidad": modalidad}
+
+    wb    = openpyxl.Workbook()
+    ws_xl = wb.active
+    ws_xl.title = f"Reporte {mes:02d}-{anio}"
+
+    V_OSC  = "1B4332"
+    V_MED  = "40916C"
+    AZUL   = "185FA5"
+    BLANCO = "FFFFFF"
+    GRIS   = "F8F9FA"
+
+    ws_xl.merge_cells("A1:F1")
+    t = ws_xl["A1"]
+    t.value     = f"COSECHA COLECTIVA — Horas trabajadas {mes:02d}/{anio}"
+    t.font      = Font(bold=True, size=14, color=BLANCO)
+    t.fill      = PatternFill("solid", fgColor=V_OSC)
+    t.alignment = Alignment(horizontal="center", vertical="center")
+    ws_xl.row_dimensions[1].height = 30
+
+    for col, h in enumerate(["Nombre", "Fecha", "Modalidad", "Horas", "Minutos", ""], 1):
+        c = ws_xl.cell(row=2, column=col, value=h)
+        c.font      = Font(bold=True, color=BLANCO, size=11)
+        c.fill      = PatternFill("solid", fgColor=V_MED)
+        c.alignment = Alignment(horizontal="center")
+
+    fila = 3
+    totales = {}
+    for nombre in sorted(resumen.keys()):
+        total_secs = 0.0
+        for fecha in sorted(resumen[nombre].keys()):
+            dato      = resumen[nombre][fecha]
+            secs      = dato["secs"]
+            modalidad = dato["modalidad"]
+            total_secs += secs
+            h = int(secs // 3600)
+            m = int((secs % 3600) // 60)
+
+            bg = BLANCO if fila % 2 == 0 else GRIS
+            datos = [nombre, fecha, modalidad.upper(), f"{h}h {m:02d}min", int(secs // 60), ""]
+            for col, val in enumerate(datos, 1):
+                cell = ws_xl.cell(row=fila, column=col, value=val)
+                cell.fill      = PatternFill("solid", fgColor=bg)
+                cell.alignment = Alignment(horizontal="left" if col == 1 else "center")
+                if col == 3:
+                    cell.font = Font(color=AZUL if modalidad == "virtual" else V_OSC, bold=True, size=10)
+            fila += 1
+
+        totales[nombre] = total_secs
+        h = int(total_secs // 3600)
+        m = int((total_secs % 3600) // 60)
+        ws_xl.merge_cells(f"A{fila}:B{fila}")
+        for col in range(1, 7):
+            c = ws_xl.cell(row=fila, column=col)
+            c.fill = PatternFill("solid", fgColor=V_MED)
+            c.font = Font(bold=True, color=BLANCO)
+            c.alignment = Alignment(horizontal="center")
+        ws_xl.cell(row=fila, column=1, value=f"TOTAL  {nombre.upper()}")
+        ws_xl.cell(row=fila, column=4, value=f"{h}h {m:02d}min")
+        ws_xl.cell(row=fila, column=5, value=int(total_secs // 60))
+        fila += 2
+
+    gran_total = sum(totales.values())
+    h = int(gran_total // 3600)
+    m = int((gran_total % 3600) // 60)
+    ws_xl.merge_cells(f"A{fila}:B{fila}")
+    for col in range(1, 7):
+        c = ws_xl.cell(row=fila, column=col)
+        c.fill = PatternFill("solid", fgColor=V_OSC)
+        c.font = Font(bold=True, size=12, color=BLANCO)
+        c.alignment = Alignment(horizontal="center")
+    ws_xl.cell(row=fila, column=1, value="TOTAL EQUIPO")
+    ws_xl.cell(row=fila, column=4, value=f"{h}h {m:02d}min")
+    ws_xl.cell(row=fila, column=5, value=int(gran_total // 60))
+
+    ws_xl.column_dimensions["A"].width = 28
+    ws_xl.column_dimensions["B"].width = 14
+    ws_xl.column_dimensions["C"].width = 14
+    ws_xl.column_dimensions["D"].width = 14
+    ws_xl.column_dimensions["E"].width = 10
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    await update.message.reply_document(
+        document=buf,
+        filename=f"CosechaColectiva_Horas_{mes:02d}_{anio}.xlsx",
+        caption=f"📊 Reporte {mes:02d}/{anio} — Cosecha Colectiva\n🏢 Presencial + 💻 Virtual"
+    )
+
+async def auto_desconectar(ctx: ContextTypes.DEFAULT_TYPE):
+    now   = now_lp()
+    fecha = fmt_date(now)
+    ws    = get_sheet()
+    all_rows = ws.get_all_records()
+
+    from collections import defaultdict
+    usuarios = defaultdict(list)
+    for r in all_rows:
+        uid = str(r["user_id"])
+        if uid:
+            usuarios[uid].append(r)
+
+    cerrados = []
+    for uid, rows in usuarios.items():
+        rows_hoy = [r for r in rows if r["fecha"] == fecha]
+        if is_working(rows_hoy):
+            nombre    = rows_hoy[-1]["nombre"]
+            modalidad = get_modalidad_hoy(rows_hoy)
+            horas     = calc_hours(rows_hoy)
+            ws.append_row([uid, nombre, fecha, "SALGO", modalidad, "23:59", fmt_dur(horas)])
+            cerrados.append(nombre)
+
+    if cerrados and ctx.job.data:
+        nombres_txt = "\n".join(f"  • {n}" for n in cerrados)
+        await ctx.bot.send_message(
+            chat_id=ctx.job.data,
+            text=(
+                f"🌙 *Cierre automático de medianoche*\n"
+                f"Se cerró la sesión de:\n{nombres_txt}\n\n"
+                f"_Recuerden registrar su entrada mañana._ 🌱"
+            ),
+            parse_mode="Markdown"
+        )
+
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",   start))
-    app.add_handler(CommandHandler("hoy",     hoy))
-    app.add_handler(CommandHandler("reporte", reporte))
-    app.add_handler(CommandHandler("equipo",  equipo))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    logger.info("🌱 Wason bot arrancando...")
+
+    app.add_handler(CommandHandler("entro",        entro))
+    app.add_handler(CommandHandler("entrovirtual", entrovirtual))
+    app.add_handler(CommandHandler("salir",        salir))
+    app.add_handler(CommandHandler("equipo",       equipo))
+    app.add_handler(CommandHandler("reporte",      reporte))
+
+    job_queue = app.job_queue
+    job_queue.run_daily(
+        auto_desconectar,
+        time=datetime.strptime("23:59", "%H:%M").replace(tzinfo=TZ).timetz(),
+        data=GROUP_ID,
+        name="medianoche"
+    )
+
+    logger.info("🌱 Wason v4 arrancando — modo grupo...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
