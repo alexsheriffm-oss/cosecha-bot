@@ -84,7 +84,8 @@ def is_working(rows):
 def get_modalidad_hoy(rows):
     entradas = [r for r in rows if r["tipo"] == "ENTRO"]
     if entradas:
-        return entradas[-1].get("modalidad", "presencial")
+        modalidad = str(entradas[-1].get("modalidad", "")).strip().lower()
+        return modalidad if modalidad in ("virtual", "presencial") else "presencial"
     return None
 
 async def entro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -221,7 +222,7 @@ async def equipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if working:
             entrada_hora = [r for r in rows_hoy if r["tipo"] == "ENTRO"][-1]["hora"]
             dato = (nombre, fmt_dur(horas), entrada_hora)
-            if modalidad == "virtual":
+            if modalidad and modalidad.strip().lower() == "virtual":
                 virtual_on.append(dato)
             else:
                 presencial_on.append(dato)
