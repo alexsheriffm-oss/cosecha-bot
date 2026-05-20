@@ -84,8 +84,7 @@ def is_working(rows):
 def get_modalidad_hoy(rows):
     entradas = [r for r in rows if r["tipo"] == "ENTRO"]
     if entradas:
-        modalidad = str(entradas[-1].get("modalidad", "")).strip().lower()
-        return modalidad if modalidad in ("virtual", "presencial") else "presencial"
+        return entradas[-1].get("modalidad", "presencial")
     return None
 
 async def entro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -109,7 +108,7 @@ async def entro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             hora_entrada = [r for r in rows if r["tipo"] == "ENTRO"][-1]["hora"]
             await update.message.reply_text(
                 f"⚠️ {user.first_name}, ya estás trabajando desde las *{hora_entrada}*.\n"
-                f"Usa /salir cuando termines.",
+                f"Usa /salgo cuando termines.",
                 parse_mode="Markdown"
             )
         return
@@ -136,14 +135,14 @@ async def entrovirtual(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"⚠️ {user.first_name}, ya entraste de forma *presencial* hoy.\n"
                 f"No puedes registrar entrada virtual el mismo día.\n"
-                f"Usa /salir cuando termines.",
+                f"Usa /salgo cuando termines.",
                 parse_mode="Markdown"
             )
         else:
             hora_entrada = [r for r in rows if r["tipo"] == "ENTRO"][-1]["hora"]
             await update.message.reply_text(
                 f"⚠️ {user.first_name}, ya estás trabajando (virtual) desde las *{hora_entrada}*.\n"
-                f"Usa /salir cuando termines.",
+                f"Usa /salgo cuando termines.",
                 parse_mode="Markdown"
             )
         return
@@ -222,7 +221,7 @@ async def equipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if working:
             entrada_hora = [r for r in rows_hoy if r["tipo"] == "ENTRO"][-1]["hora"]
             dato = (nombre, fmt_dur(horas), entrada_hora)
-            if modalidad and modalidad.strip().lower() == "virtual":
+            if modalidad == "virtual":
                 virtual_on.append(dato)
             else:
                 presencial_on.append(dato)
@@ -445,7 +444,7 @@ def main():
 
     app.add_handler(CommandHandler("entro",        entro))
     app.add_handler(CommandHandler("entrovirtual", entrovirtual))
-    app.add_handler(CommandHandler("salgo",        salir))
+    app.add_handler(CommandHandler("salgo",        salgo))
     app.add_handler(CommandHandler("equipo",       equipo))
     app.add_handler(CommandHandler("reporte",      reporte))
 
