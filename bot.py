@@ -102,7 +102,7 @@ async def entro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"⚠️ {user.first_name}, ya entraste como *virtual* hoy.\n"
                 f"No puedes registrar entrada presencial el mismo día.\n"
-                f"Usa /salir cuando termines.",
+                f"Usa /salgo cuando termines.",
                 parse_mode="Markdown"
             )
         else:
@@ -156,7 +156,7 @@ async def entrovirtual(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def salir(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def salgo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user  = update.effective_user
     now   = now_lp()
     fecha = fmt_date(now)
@@ -445,7 +445,7 @@ def main():
 
     app.add_handler(CommandHandler("entro",        entro))
     app.add_handler(CommandHandler("entrovirtual", entrovirtual))
-    app.add_handler(CommandHandler("salir",        salir))
+    app.add_handler(CommandHandler("salgo",        salir))
     app.add_handler(CommandHandler("equipo",       equipo))
     app.add_handler(CommandHandler("reporte",      reporte))
 
