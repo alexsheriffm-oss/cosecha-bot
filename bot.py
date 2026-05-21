@@ -12,6 +12,22 @@ from telegram.ext import (
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 import io
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+
+class PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Wason vivo!")
+    def log_message(self, *args):
+        pass
+
+def run_ping_server():
+    server = HTTPServer(("0.0.0.0", 8080), PingHandler)
+    server.serve_forever()
+
+threading.Thread(target=run_ping_server, daemon=True).start()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
