@@ -323,13 +323,29 @@ async def reporte(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         usuarios[uid].append(r)
         nombres[uid] = r["nombre"]
 
-    for uid, rows in usuarios.items():
+for uid, rows in usuarios.items():
         fechas = set(r["fecha"] for r in rows)
         for fecha in fechas:
             rows_dia  = [r for r in rows if r["fecha"] == fecha]
-            secs      = calc_hours(rows_dia)
-            modalidad = get_modalidad_hoy(rows_dia) or "presencial"
-            resumen[nombres[uid]][fecha] = {"secs": secs, "modalidad": modalidad}
+            entradas  = [r for r in rows_dia if r["tipo"] == "ENTRO"]
+            salidas   = [r for r in rows_dia if r["tipo"] == "SALGO"]
+            # Calcular por cada par entrada/salida con su modalidad
+            for i, e in enumerate(entradas):
+                mod = str(e.get("modalidad", "presencial")).strip().lower()
+                try:
+                    t_e = datetime.strptime(f"{fecha} {e['hora']}", "%d/%m/%Y %H:%M").replace(tzinfo=TZ)
+                    if i < len(salidas):
+                        t_s = datetime.strptime(f"{fecha} {salidas[i]['hora']}", "%d/%m/%Y %H:%M").replace(tzinfo=TZ)
+                        diff = (t_s - t_e).total_seconds()
+                    else:
+                        diff = (now_lp().replace(second=0, microsecond=0) - t_e).total_seconds()
+                    if 0 < diff <= 57600:
+                        key = f"{fecha}_{mod}"
+                        if key not in resumen[nombres[uid]]:
+                            resumen[nombres[uid]][key] = {"secs": 0.0, "modalidad": mod, "fecha": fecha}
+                        resumen[nombres[uid]][key]["secs"] += diff
+                except Exception:
+                    continue
 
     wb    = openpyxl.Workbook()
     ws_xl = wb.active
@@ -359,10 +375,11 @@ async def reporte(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     totales = {}
     for nombre in sorted(resumen.keys()):
         total_secs = 0.0
-        for fecha in sorted(resumen[nombre].keys()):
-            dato      = resumen[nombre][fecha]
+     for key in sorted(resumen[nombre].keys()):
+            dato      = resumen[nombre][key]
             secs      = dato["secs"]
             modalidad = dato["modalidad"]
+            fecha     = dato["fecha"]
             total_secs += secs
             h = int(secs // 3600)
             m = int((secs % 3600) // 60)
